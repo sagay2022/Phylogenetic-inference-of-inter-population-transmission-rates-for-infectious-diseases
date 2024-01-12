@@ -1,0 +1,241 @@
+setwd("/Users/jialinyang/Documents/research/data/covid19genetree/my_output/RAxML0929/JY/8clades")
+library(phybase)
+library(ape)
+library(stringr)
+library(openxlsx)
+tree = read.tree("sptree.con.tre")
+tree$node.label = as.integer(tree$node.label)
+tree$edge.length=NULL
+tree$tip.label = gsub("'","",tree$tip.label)
+#################################################
+spname = tree$tip.label
+non_human_idx = c(grep("Rhinolophus",spname),grep("Hipposideros",spname),grep("Rousettus",spname),
+                  grep("bat", spname),grep("NC471", spname),grep("addit", spname),
+                  grep("pangolin",spname))
+tree2 = drop.tip(tree, non_human_idx)
+write.tree(tree2,"sptree_human.tre")
+
+#################################################
+# build a matrix for continent and color information
+tree_str = scan("sptree_human.tre", what = "chatacter")
+spname_alpha = species.name(tree_str)
+spname_ori = str_remove_all(tree_str, "\\(")
+spname_ori = str_remove_all(spname_ori, "[\\);.]")
+spname_ori = unlist(strsplit(spname_ori, ",", fixed = TRUE))
+
+origin_mat = matrix(NA, nrow = length(tree2$tip.label), ncol = 5)
+colnames(origin_mat) = c("Names", "Name_Abbr","Country","Continent","Color")
+spname = spname_ori
+# 1. read original species names
+origin_mat[,1] = spname # spname = rownames(mat1) 
+
+# Origin Place
+spname_loc = rep("", length(tree2$tip.label))
+for (i in grep("/", spname)){
+  spname_loc[i] = tolower(unlist(strsplit(spname[i],split="/"))[2])
+}
+spname_loc[grep("Korea",spname)] = "south korea"
+spname_loc[grep("Africa",spname)] = "south africa"
+spname_loc[grep("Hong",spname)] = "china"
+origin_mat[,2] = spname_loc
+
+# 2.3. Country names
+# Chinese city name
+cities_china = read.xlsx("cn.xlsx",sheet = 1, colNames = T)
+names = c(tolower(cities_china$city),"tianmen",
+          "anhui","fujian","gansu","guangdong","guizhou","hainan","hebei","heilongjiang","henan","hubei","wuhan-hu-1",
+          "hunan","jiangsu","jiangxi","jilin","liaoning","qinghai","shaanxi","shanxi","shandong","sichuan","hong_",
+          "yunnan","zhejiang","taiwan","guangxi","inner mongolia","ningxia","tibet","xinjiang","hong kong","macao")
+names = names[-grep("india", names)]
+# transfer city/province to country name
+spname_country = spname_loc
+for(i in 1:length(tree2$tip.label))
+{
+  if(length(grep(spname_loc[i], names, fixed=T))>0){spname_country[i]="china"}else
+    if(length(grep(spname_loc[i], "nonthaburi", fixed=T))>0){spname_country[i]="thailand"}else
+      if(length(grep(spname_loc[i], c("england","wales","scotland")))>0){spname_country[i]="uk"}else
+        if(length(grep("czech", spname_loc[i]))>0){spname_country[i]="czech republic"}else
+          if(length(grep("saudi", spname_loc[i]))>0){spname_country[i]="saudi arabia"}else
+            if(length(grep("sri", spname_loc[i]))>0){spname_country[i]="sri lanka"}else
+              if(length(grep("new", spname_loc[i]))>0){spname_country[i]="new zealand"}else
+                if(length(grep("hong_", spname_loc[i]))>0){spname_country[i]="china"}
+}
+origin_mat[,3] = spname_country
+
+# 4. Set Continent name
+library(countrycode)
+continent = countrycode(sourcevar = levels(as.factor(spname_country)), origin = "country.name", destination = "continent")
+for (i in 1:length(tree2$tip.label)){
+  origin_mat[i,4] = continent[grep(origin_mat[i,3],levels(as.factor(spname_country)))]
+}
+
+# 5. Set Continent Color
+continentColor = c("#984ea3","#ffff33","#e41a1c","#4daf4a", "#377eb8")
+continentPalette = levels(as.factor(continent))
+for (i in 1:length(tree2$tip.label)){
+  origin_mat[i,5] = continentColor[grep(origin_mat[i,4],continentPalette)]
+}
+
+#################################################
+# Add name abbr
+name_abbr = rep("", length(tree2$tip.label))
+continent_name = c("Africa","Asia","Europe","Americas","Oceania")
+continent_abbr = c("F","S","E","M","O")
+for (j in 1:5){
+  for (i in 1:sum(origin_mat[,4]==continent_name[j])){
+    # number continent j from 1 
+    name_abbr[grep(continent_name[j], origin_mat[,4])[i]]= paste(continent_abbr[j], i, sep="")
+  }
+}
+origin_mat[,2] = name_abbr
+write.table(origin_mat, "label_info.txt",sep = " ")
+
+#################################################
+# Substitute taxa short names in consensus tree
+tree_full_name = read.tree("sptree_human.tre")
+tree_full_name$edge.length = NULL
+tree_full_name$tip.label = name_abbr
+tree_full_name$root.edge = NULL
+write.tree(tree_full_name, "sptree_human_abbr.tre")
+
+
+#################################################
+#################################################
+# Try divide clades for consensus tree
+#################################################
+#################################################
+# label information
+label_info = read.table("label_info.txt",sep = " ")
+label_info = as.matrix(label_info)
+
+# divide clades
+treestr = scan("sptree_human_abbr.tre", what = "character")
+group_id = c("S","M","E","F","O")
+
+
+##########################################################################################
+# continue to split a tree into clades until each clade is dominated by a particular group 
+# Dominate: the proportion of the major group > threshold 
+##########################################################################################
+
+#this function calculates the group composition
+composition = function(treestr,group_id){
+  # input format: "(xxx)bootvalue"
+  str = paste("(",gsub(",","\\)\\,\\(",treestr),")",sep="")
+  # unlist by "(" and find all bootstrap support values in this string
+  unlst = unlist(strsplit(str, split = "\\)"))
+  if (length(unlst)==1){
+    boot.value = 0
+  }else{
+    boot.value = unlst[length(unlst)]
+  }
+  # remove all bootstrap support values from input treestr
+  unlst[-grep("[A-Z]", unlst)] = "."
+  treestr = paste(unlst, collapse = ")")
+  treestr = gsub("\\.","",treestr)
+  
+  # get composition
+  treestr = gsub("\\(","",treestr)
+  treestr = gsub("\\)","",treestr)
+  species = unlist(strsplit(treestr,","))
+  nspecies = length(species)
+  composition = rep(0,length(group_id))
+  for(i in 1:length(group_id)){
+    composition[i] = length(grep(group_id[i],species))/nspecies
+  }
+  x = paste("(",paste(species,collapse=",",sep=","),")",sep="")
+  
+  # output
+  result = list(group="",composition=as.vector)
+  result$bootvalue = boot.value
+  result$group = x
+  result$composition = composition
+  result
+}
+
+#this function split a treestr into clades
+split = function(treestr){ 
+  # input format: "(xxx)bootvalue" "(A3,B629)16"
+  # remove bootstrap support value for this clade
+  unlst = unlist(strsplit(treestr, split = "\\)"))
+  unlst = unlst[-length(unlst)]
+  unlst[-grep("[A-Z]", unlst)] = paste(unlst[-grep("[A-Z]", unlst)], ".",sep="")
+  treestr = paste(unlst, collapse = ")")
+  treestr = gsub("\\.","",treestr)
+  
+  str = unlist(strsplit(treestr,split=""))[-1]
+  x = str
+  index1 = which(x=="(")
+  index2 = which(x==")")
+  if ((length(index1)+length(index2))==0){
+    # if this clade only have one bootstrap support value
+    str_taxa = paste(x, collapse="")
+    outgroups = unlist(strsplit(str_taxa, split=","))
+    result = paste("(", outgroups,")0",sep="")
+    return(result)
+  }else{
+    # if this clade can be divided continuously
+    x[index1] = 1
+    x[index2] = -1
+    x[-c(index1,index2)] = 0
+    cum_sum = cumsum(as.numeric(x))
+    index1 = which(cum_sum==0)
+    index2 = c()
+    for (i in 1:(length(index1)-1)){
+      if (index1[i+1]!=(index1[i]+1)) index2 = c(index2,index1[i])
+    }
+    index2 = c(index2, index1[length(index1)]+1)
+    ngroup = length(index2)
+    
+    index = matrix(c(rep(1, ngroup), index2-1),nrow = ngroup, ncol = 2, byrow = F)
+    index[2:ngroup,1]=index[1:(ngroup-1),2]+2
+    
+    result = rep("",ngroup)
+    for(i in 1:ngroup){
+      result[i] = paste(str[index[i,1]:index[i,2]],collapse="",sep="")
+    }
+    if (length(grep("\\(",result[1]))==0){
+      result[1] = paste("(", result[1],")0",sep="")
+    }
+    
+    return(result)
+  }
+}
+
+#the recursive function continues to split the treestr until each clade is dominated by a group
+grouping = function(treestr, group_id, threshold, result, cut_bv){
+  x = composition(treestr,group_id)
+  if(max(x$composition)>threshold | x$bootvalue>cut_bv){
+    return(paste(result,
+                 paste(x$group,x$bootvalue,sep = ":"),
+                 sep = ";"))
+  }else{
+    str = split(treestr)
+    for(i in 1:length(str)) result=grouping(treestr=str[i],group_id=group_id,threshold=threshold,result,cut_bv=cut_bv)
+  }
+  return (result)
+}
+
+#this is the wrapper function
+find.groups = function(treestr,group_id,threshold, cut_bv){
+  treestr = gsub(";","",treestr)
+  treestr = gsub(" ","",treestr)
+  x = groups = grouping(treestr,group_id,threshold,result="",cut_bv)
+  substr(x,2,nchar(x))
+}
+
+
+# divide clades
+treestr = scan("sptree_human_abbr.tre", what = "character")
+group_id = c("S","M","E","F","O")
+# print results
+thres = 0.8
+cut_bv = 80
+result = find.groups(treestr,group_id,threshold=thres,cut_bv = cut_bv)
+results = unlist(strsplit(result, split=";"))
+num_genomes = str_count(results, ",")+1
+clades50 = results[num_genomes>50]
+
+write(clades50, "clades_final.txt")
+
+
